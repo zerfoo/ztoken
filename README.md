@@ -1,6 +1,8 @@
 # ztoken
 
-BPE tokenizer for Go with HuggingFace compatibility. Part of the [Zerfoo](https://github.com/zerfoo) ecosystem.
+BPE tokenizer library for Go with HuggingFace compatibility.
+
+Part of the [Zerfoo](https://github.com/zerfoo) ML ecosystem.
 
 ## Install
 
@@ -10,20 +12,19 @@ go get github.com/zerfoo/ztoken
 
 ## Features
 
-- **Byte-Pair Encoding (BPE)** -- production-grade tokenizer with merge-based subword splitting
-- **SentencePiece support** -- handles SentencePiece-style pre-tokenization with `▁` boundaries
-- **Special tokens** -- automatic detection and handling of BOS, EOS, PAD, and UNK tokens
-- **GGUF extraction** -- extract tokenizer vocabulary and merges from GGUF model metadata
-- **HuggingFace loader** -- load tokenizers directly from `tokenizer.json` files
+- Byte-Pair Encoding (BPE) tokenizer with HuggingFace tokenizer.json support
+- SentencePiece compatibility mode
+- Special token handling (BOS, EOS, PAD, UNK)
+- GGUF tokenizer extraction via `ztoken/gguf` sub-package
+- Zero external dependencies (stdlib only, plus golang.org/x/text)
 
-## Quick Start
+## Quick start
 
 ```go
 package main
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/zerfoo/ztoken"
 )
@@ -31,23 +32,15 @@ import (
 func main() {
 	tok, err := ztoken.LoadFromJSON("tokenizer.json")
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-
-	ids, err := tok.Encode("Hello, world!")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Token IDs:", ids)
-
-	text, err := tok.Decode(ids)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Decoded:", text)
+	ids, _ := tok.Encode("Hello, world!")
+	fmt.Println(ids)
+	text, _ := tok.Decode(ids)
+	fmt.Println(text)
 }
 ```
 
 ## License
 
-Apache 2.0 -- see [LICENSE](LICENSE) for details.
+Apache 2.0
