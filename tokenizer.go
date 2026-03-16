@@ -10,6 +10,8 @@ import (
 )
 
 // SpecialTokens holds IDs for commonly used special tokens.
+//
+// Stable.
 type SpecialTokens struct {
 	BOS int // Beginning of sequence
 	EOS int // End of sequence
@@ -18,6 +20,8 @@ type SpecialTokens struct {
 }
 
 // Tokenizer is the interface for all tokenizer implementations.
+//
+// Stable.
 type Tokenizer interface {
 	// Encode converts text into a sequence of token IDs.
 	Encode(text string) ([]int, error)
@@ -41,6 +45,8 @@ type Tokenizer interface {
 // WhitespaceTokenizer provides simple whitespace-based tokenization.
 // It splits text on whitespace boundaries and maps words to integer IDs.
 // Useful for testing and non-production scenarios.
+//
+// Stable.
 type WhitespaceTokenizer struct {
 	vocab        map[string]int
 	reverseVocab map[int]string

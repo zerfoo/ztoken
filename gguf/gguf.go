@@ -12,6 +12,8 @@ import (
 )
 
 // Metadata provides access to GGUF key-value metadata.
+//
+// Stable.
 type Metadata interface {
 	GetString(key string) (string, bool)
 	GetStringArray(key string) ([]string, bool)

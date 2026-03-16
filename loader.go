@@ -157,6 +157,8 @@ func extractSpecialTokens(tokens []addedTokenJSON) SpecialTokens {
 }
 
 // NormalizerFunc transforms text before tokenization.
+//
+// Stable.
 type NormalizerFunc func(string) string
 
 // buildNormalizer creates a normalizer function from the JSON config.

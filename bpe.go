@@ -6,6 +6,8 @@ import (
 )
 
 // MergePair represents an adjacent token pair used in BPE merging.
+//
+// Stable.
 type MergePair struct {
 	Left  string
 	Right string
@@ -13,6 +15,8 @@ type MergePair struct {
 
 // BPETokenizer implements the Tokenizer interface using byte-pair encoding.
 // It loads vocabulary and merge rules from HuggingFace tokenizer.json format.
+//
+// Stable.
 type BPETokenizer struct {
 	vocab        map[string]int
 	reverseVocab map[int]string
