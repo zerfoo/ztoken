@@ -20,9 +20,10 @@ type tokenizerJSON struct {
 }
 
 type modelJSON struct {
-	Type      string          `json:"type"`
-	Vocab     map[string]int  `json:"vocab"`
-	RawMerges json.RawMessage `json:"merges"`
+	Type            string          `json:"type"`
+	Vocab           map[string]int  `json:"vocab"`
+	RawMerges       json.RawMessage `json:"merges"`
+	ContinuingSubwordPrefix string `json:"continuing_subword_prefix"`
 }
 
 type addedTokenJSON struct {
@@ -52,7 +53,31 @@ type decoderPatternJSON struct {
 	String string `json:"String"`
 }
 
+// Load reads a HuggingFace tokenizer.json file and returns the appropriate
+// Tokenizer implementation based on the model type (BPE or WordPiece).
+func Load(path string) (Tokenizer, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // user-provided path
+	if err != nil {
+		return nil, fmt.Errorf("read tokenizer.json: %w", err)
+	}
+
+	var tj tokenizerJSON
+	if err := json.Unmarshal(data, &tj); err != nil {
+		return nil, fmt.Errorf("parse tokenizer.json: %w", err)
+	}
+
+	switch tj.Model.Type {
+	case "WordPiece":
+		return loadWordPiece(tj)
+	case "", "BPE":
+		return loadBPE(tj)
+	default:
+		return nil, fmt.Errorf("unsupported model type: %q (supported: BPE, WordPiece)", tj.Model.Type)
+	}
+}
+
 // LoadFromJSON reads a HuggingFace tokenizer.json file and returns a BPETokenizer.
+// For loading any tokenizer type, use [Load] instead.
 func LoadFromJSON(path string) (*BPETokenizer, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // user-provided path
 	if err != nil {
@@ -68,6 +93,11 @@ func LoadFromJSON(path string) (*BPETokenizer, error) {
 		return nil, fmt.Errorf("unsupported model type: %q (only BPE supported)", tj.Model.Type)
 	}
 
+	return loadBPE(tj)
+}
+
+// loadBPE constructs a BPETokenizer from parsed JSON.
+func loadBPE(tj tokenizerJSON) (*BPETokenizer, error) {
 	// Parse merges — supports both ["a b", …] and [["a","b"], …] formats.
 	merges, err := parseMerges(tj.Model.RawMerges)
 	if err != nil {
@@ -90,6 +120,26 @@ func LoadFromJSON(path string) (*BPETokenizer, error) {
 	if isSentencePieceDecoder(tj.Decoder) {
 		tok.SetSentencePiece(true)
 	}
+
+	return tok, nil
+}
+
+// loadWordPiece constructs a WordPieceTokenizer from parsed JSON.
+func loadWordPiece(tj tokenizerJSON) (*WordPieceTokenizer, error) {
+	special := extractSpecialTokens(tj.AddedTokens)
+	normalizer := buildNormalizer(tj.Normalizer)
+
+	tok := NewWordPieceTokenizer(tj.Model.Vocab, special)
+	tok.normalizer = normalizer
+
+	// Register special token strings for exact matching.
+	specialMap := make(map[string]int)
+	for _, at := range tj.AddedTokens {
+		if at.Special {
+			specialMap[at.Content] = at.ID
+		}
+	}
+	tok.specialTokens = specialMap
 
 	return tok, nil
 }
@@ -136,6 +186,8 @@ func isSentencePieceDecoder(d *decoderJSON) bool {
 }
 
 // extractSpecialTokens finds BOS, EOS, PAD, UNK from added_tokens.
+// Recognizes both GPT-style (<s>, </s>, <pad>, <unk>) and BERT-style
+// ([CLS], [SEP], [PAD], [UNK]) special token conventions.
 func extractSpecialTokens(tokens []addedTokenJSON) SpecialTokens {
 	special := SpecialTokens{}
 	for _, t := range tokens {
@@ -143,13 +195,13 @@ func extractSpecialTokens(tokens []addedTokenJSON) SpecialTokens {
 			continue
 		}
 		switch {
-		case strings.Contains(t.Content, "bos") || t.Content == "<s>":
+		case strings.Contains(t.Content, "bos") || t.Content == "<s>" || t.Content == "[CLS]":
 			special.BOS = t.ID
-		case strings.Contains(t.Content, "eos") || t.Content == "</s>":
+		case strings.Contains(t.Content, "eos") || t.Content == "</s>" || t.Content == "[SEP]":
 			special.EOS = t.ID
-		case strings.Contains(t.Content, "pad") || t.Content == "<pad>":
+		case strings.Contains(t.Content, "pad") || t.Content == "<pad>" || t.Content == "[PAD]":
 			special.PAD = t.ID
-		case strings.Contains(t.Content, "unk") || t.Content == "<unk>":
+		case strings.Contains(t.Content, "unk") || t.Content == "<unk>" || t.Content == "[UNK]":
 			special.UNK = t.ID
 		}
 	}
