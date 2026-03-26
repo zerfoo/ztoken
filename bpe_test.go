@@ -1,6 +1,7 @@
 package ztoken
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -558,27 +559,28 @@ func TestSentencePieceUnigram_RoundTrip(t *testing.T) {
 func TestSentencePieceUnigram_UnknownChars(t *testing.T) {
 	tok := makeTestSentencePieceUnigram()
 
-	// Characters not in vocab should produce UNK tokens.
+	// Characters not in vocab should produce UNK or ▁ tokens via Viterbi.
+	// "xyz" -> pre-tokenized as "▁xyz". Since ▁x, ▁y, ▁z are not in vocab,
+	// Viterbi will match ▁ first, then x, y, z via byte fallback or UNK.
 	ids, err := tok.Encode("xyz")
 	if err != nil {
 		t.Fatalf("Encode error: %v", err)
 	}
-	// "xyz" -> pre-tokenized as "▁xyz". Since ▁x, ▁y, ▁z are not in vocab,
-	// the greedy matcher will match ▁ first, then x, y, z individually → all UNK.
+	if len(ids) == 0 {
+		t.Fatal("expected non-empty token list for 'xyz'")
+	}
 	for _, id := range ids {
-		if id != tok.special.UNK {
-			// Either ▁ (id=3) or UNK (id=0) are acceptable since ▁ is in vocab.
-			if id != 3 {
-				t.Errorf("expected UNK or ▁ token for unknown chars, got id=%d", id)
-			}
+		if id != tok.special.UNK && id != 3 {
+			t.Errorf("expected UNK (0) or ▁ (3) token for unknown chars, got id=%d", id)
 		}
 	}
 }
 
-func TestSentencePieceUnigram_PrefersLongestMatch(t *testing.T) {
+func TestSentencePieceUnigram_ViterbiOptimal(t *testing.T) {
 	tok := makeTestSentencePieceUnigram()
 
-	// "Hello" should encode as one token ▁Hello (id=8), not ▁H + e + l + l + o.
+	// "Hello" should encode as one token ▁Hello (id=8) via Viterbi,
+	// since it has the best score (-1.0) vs splitting into subwords.
 	ids, err := tok.Encode("Hello")
 	if err != nil {
 		t.Fatalf("Encode error: %v", err)
@@ -603,5 +605,218 @@ func TestSentencePieceUnigram_WithBPEFallback(t *testing.T) {
 	// Should still use BPE merging, producing "hello" (id=17).
 	if len(ids) != 1 || ids[0] != 17 {
 		t.Errorf("with merges present, expected BPE encoding [17], got %v", ids)
+	}
+}
+
+func TestSentencePieceUnigram_ViterbiBeatsGreedy(t *testing.T) {
+	// This test demonstrates that Viterbi finds a better segmentation than greedy.
+	// Vocab has "▁hel" and "lo" with good scores, and "▁h" and "ello" with worse scores.
+	// Greedy longest-match would pick "▁hello" if available, or "▁hell" + "o".
+	// But here we set up scores so "▁hel" + "lo" is strictly better than "▁hell" + "o".
+	vocab := map[string]int{
+		"<unk>":     0,
+		"<s>":      1,
+		"</s>":     2,
+		"\u2581":      3,
+		"\u2581h":     4,
+		"\u2581he":    5,
+		"\u2581hel":   6,
+		"\u2581hell":  7,
+		"o":        8,
+		"l":        9,
+		"lo":       10,
+	}
+	scores := make([]float32, 11)
+	scores[0] = -100   // <unk>
+	scores[1] = -100   // <s>
+	scores[2] = -100   // </s>
+	scores[3] = -5.0   // ▁
+	scores[4] = -4.0   // ▁h
+	scores[5] = -3.0   // ▁he
+	scores[6] = -1.5   // ▁hel  (good)
+	scores[7] = -3.0   // ▁hell (worse than ▁hel)
+	scores[8] = -3.0   // o     (bad)
+	scores[9] = -4.0   // l     (bad)
+	scores[10] = -1.0  // lo    (good)
+
+	special := SpecialTokens{BOS: 1, EOS: 2, PAD: 0, UNK: 0}
+	tok := NewBPETokenizer(vocab, nil, special, false)
+	tok.SetSentencePiece(true)
+	tok.SetScores(scores)
+
+	ids, err := tok.Encode("hello")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	// Viterbi should choose "▁hel" + "lo" (score -1.5 + -1.0 = -2.5)
+	// over "▁hell" + "o" (score -3.0 + -3.0 = -6.0).
+	want := []int{6, 10} // ▁hel, lo
+	if len(ids) != len(want) {
+		t.Fatalf("Encode(\"hello\") = %v, want %v", ids, want)
+	}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("Encode(\"hello\")[%d] = %d, want %d", i, id, want[i])
+		}
+	}
+}
+
+// makeTestSentencePieceUnigramWithBytes creates a SentencePiece unigram
+// tokenizer that includes <0xNN> byte fallback tokens.
+func makeTestSentencePieceUnigramWithBytes() *BPETokenizer {
+	vocab := map[string]int{
+		"<unk>":     0,
+		"<s>":      1,
+		"</s>":     2,
+		"\u2581":      3,
+		"\u2581the":   4,
+		"\u2581capital": 5,
+		"\u2581of":    6,
+		"\u2581France": 7,
+		"\u2581is":    8,
+		"\u2581Paris":  9,
+		"\u2581a":     10,
+		"a":        11,
+		"t":        12,
+		"h":        13,
+		"e":        14,
+	}
+	// Add byte fallback tokens for all 256 bytes.
+	nextID := 15
+	for b := 0; b < 256; b++ {
+		tok := fmt.Sprintf("<0x%02X>", b)
+		vocab[tok] = nextID
+		nextID++
+	}
+
+	scores := make([]float32, nextID)
+	scores[0] = -100   // <unk>
+	scores[1] = -100   // <s>
+	scores[2] = -100   // </s>
+	scores[3] = -5.0   // ▁
+	scores[4] = -1.0   // ▁the
+	scores[5] = -0.5   // ▁capital
+	scores[6] = -1.0   // ▁of
+	scores[7] = -0.5   // ▁France
+	scores[8] = -1.0   // ▁is
+	scores[9] = -0.5   // ▁Paris
+	scores[10] = -2.0  // ▁a
+	scores[11] = -4.0  // a
+	scores[12] = -4.0  // t
+	scores[13] = -4.0  // h
+	scores[14] = -4.0  // e
+	// Byte fallback tokens get very negative scores.
+	for i := 15; i < nextID; i++ {
+		scores[i] = -10.0
+	}
+
+	special := SpecialTokens{BOS: 1, EOS: 2, PAD: 0, UNK: 0}
+	tok := NewBPETokenizer(vocab, nil, special, false)
+	tok.SetSentencePiece(true)
+	tok.SetScores(scores)
+	return tok
+}
+
+func TestSentencePieceUnigram_EncodeDecodeSentence(t *testing.T) {
+	tok := makeTestSentencePieceUnigramWithBytes()
+
+	text := "The capital of France is Paris"
+	ids, err := tok.Encode(text)
+	if err != nil {
+		t.Fatalf("Encode(%q) error: %v", text, err)
+	}
+	if len(ids) == 0 {
+		t.Fatalf("Encode(%q) produced empty result", text)
+	}
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if decoded != text {
+		t.Errorf("round-trip failed: %q -> %v -> %q", text, ids, decoded)
+	}
+}
+
+func TestSentencePieceUnigram_ByteFallback(t *testing.T) {
+	tok := makeTestSentencePieceUnigramWithBytes()
+
+	// Encode a string with characters not directly in vocab.
+	// The emoji will require byte fallback via <0xNN> tokens.
+	text := "the \xc3\xa9"  // "the é" — é is 0xC3 0xA9 in UTF-8
+	ids, err := tok.Encode(text)
+	if err != nil {
+		t.Fatalf("Encode(%q) error: %v", text, err)
+	}
+	if len(ids) == 0 {
+		t.Fatalf("Encode(%q) produced empty result", text)
+	}
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if decoded != text {
+		t.Errorf("byte fallback round-trip: %q -> %v -> %q", text, ids, decoded)
+	}
+}
+
+func TestSentencePieceUnigram_EmptyAndSingle(t *testing.T) {
+	tok := makeTestSentencePieceUnigram()
+
+	// Empty string.
+	ids, err := tok.Encode("")
+	if err != nil {
+		t.Fatalf("Encode empty error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("Encode(\"\") = %v, want []", ids)
+	}
+
+	// Single character that exists in vocab.
+	ids, err = tok.Encode("a")
+	if err != nil {
+		t.Fatalf("Encode(\"a\") error: %v", err)
+	}
+	if len(ids) == 0 {
+		t.Fatal("Encode(\"a\") produced empty result")
+	}
+}
+
+func TestSentencePieceUnigram_LongText(t *testing.T) {
+	tok := makeTestSentencePieceUnigram()
+
+	// Encode and decode a longer text with repeated words.
+	text := "the test is a test the test is a test"
+	ids, err := tok.Encode(text)
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if decoded != text {
+		t.Errorf("round-trip failed: %q -> %v -> %q", text, ids, decoded)
+	}
+}
+
+func TestDecodeSentencePieceBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no byte tokens", "hello", "hello"},
+		{"single byte", "<0x41>", "A"},
+		{"multiple bytes", "<0xC3><0xA9>", "\xc3\xa9"}, // é
+		{"mixed", "hello<0x21>world", "hello!world"},
+		{"invalid hex preserved", "<0xZZ>", "<0xZZ>"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decodeSentencePieceBytes(tc.input)
+			if got != tc.want {
+				t.Errorf("decodeSentencePieceBytes(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
 	}
 }
