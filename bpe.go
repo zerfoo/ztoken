@@ -2,6 +2,7 @@ package ztoken
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -202,12 +203,51 @@ func (t *BPETokenizer) Decode(ids []int) (string, error) {
 		return decoded, nil
 	}
 	if t.sentencePiece {
+		// Decode <0xNN> byte tokens back to actual bytes.
+		result = decodeSentencePieceBytes(result)
 		// Replace ▁ with space and trim leading space.
 		result = strings.ReplaceAll(result, "\u2581", " ")
 		result = strings.TrimPrefix(result, " ")
 		return result, nil
 	}
 	return result, nil
+}
+
+// decodeSentencePieceBytes replaces <0xNN> hex byte tokens with the
+// corresponding raw bytes. This reverses the byte fallback encoding
+// used by SentencePiece for characters not in the vocabulary.
+func decodeSentencePieceBytes(s string) string {
+	var sb strings.Builder
+	i := 0
+	for i < len(s) {
+		// Look for <0xNN> pattern: exactly 6 characters.
+		if i+6 <= len(s) && s[i] == '<' && s[i+1] == '0' && s[i+2] == 'x' && s[i+5] == '>' {
+			hi := unhex(s[i+3])
+			lo := unhex(s[i+4])
+			if hi >= 0 && lo >= 0 {
+				sb.WriteByte(byte(hi<<4 | lo))
+				i += 6
+				continue
+			}
+		}
+		sb.WriteByte(s[i])
+		i++
+	}
+	return sb.String()
+}
+
+// unhex converts a hex digit character to its value, or -1 if invalid.
+func unhex(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	default:
+		return -1
+	}
 }
 
 // VocabSize returns the number of tokens in the vocabulary.
@@ -259,59 +299,104 @@ func (t *BPETokenizer) SetScores(scores []float32) {
 	}
 }
 
-// sentencePieceEncode tokenizes text using greedy longest-match with
-// score-based selection. For each position, it finds all vocabulary tokens
-// that match the input at that position, selects the longest match (breaking
-// ties by highest score), and advances past the matched token.
+// sentencePieceEncode tokenizes text using Viterbi dynamic programming to find
+// the segmentation that maximizes the sum of log-probability scores.
 //
 // This is used for SentencePiece unigram models that provide vocabulary
-// scores but no BPE merge table (e.g., Mistral 7B GGUF).
+// scores but no BPE merge table (e.g., Mistral 7B GGUF). The Viterbi approach
+// finds the globally optimal segmentation, unlike greedy longest-match which
+// can produce suboptimal splits.
 func (t *BPETokenizer) sentencePieceEncode(text string) []int {
 	if text == "" {
 		return nil
 	}
-	var ids []int
-	pos := 0
-	textBytes := []byte(text)
-	n := len(textBytes)
 
-	for pos < n {
-		bestLen := 0
-		bestID := t.special.UNK
-		bestScore := float32(-1e30)
+	n := len(text) // byte length
 
-		// Search for the longest matching token at this position.
-		// Limit search window to maxTokenLen bytes.
-		maxEnd := pos + t.maxTokenLen
-		if maxEnd > n {
-			maxEnd = n
+	// Viterbi forward pass: find best segmentation.
+	// bestScore[i] = best total score for text[:i]
+	// bestLen[i] = byte length of the last token in the best path ending at i
+	bestScore := make([]float64, n+1)
+	bestLen := make([]int, n+1)
+	for i := range bestScore {
+		bestScore[i] = math.Inf(-1)
+	}
+	bestScore[0] = 0
+
+	for i := 0; i < n; i++ {
+		if math.IsInf(bestScore[i], -1) {
+			continue
 		}
-
-		for end := pos + 1; end <= maxEnd; end++ {
-			candidate := string(textBytes[pos:end])
+		// Try all possible tokens starting at position i.
+		maxLen := t.maxTokenLen
+		if maxLen > n-i {
+			maxLen = n - i
+		}
+		for tokenLen := 1; tokenLen <= maxLen; tokenLen++ {
+			candidate := text[i : i+tokenLen]
 			if id, ok := t.vocab[candidate]; ok {
-				candidateLen := end - pos
-				// Prefer longer matches. For equal length, prefer higher score.
-				if candidateLen > bestLen || (candidateLen == bestLen && t.tokenScore(id) > bestScore) {
-					bestLen = candidateLen
-					bestID = id
-					bestScore = t.tokenScore(id)
+				score := bestScore[i] + float64(t.tokenScore(id))
+				if score > bestScore[i+tokenLen] {
+					bestScore[i+tokenLen] = score
+					bestLen[i+tokenLen] = tokenLen
 				}
 			}
 		}
-
-		if bestLen == 0 {
-			// No matching token found; emit UNK and advance by one byte.
-			ids = append(ids, t.special.UNK)
-			// Advance past one UTF-8 character, not just one byte.
-			_, size := decodeRune(textBytes[pos:])
-			pos += size
+		// Byte fallback: if no vocab token covers position i, use <0xNN>.
+		byteToken := fmt.Sprintf("<0x%02X>", text[i])
+		if id, ok := t.vocab[byteToken]; ok {
+			score := bestScore[i] + float64(t.tokenScore(id))
+			if score > bestScore[i+1] {
+				bestScore[i+1] = score
+				bestLen[i+1] = 1
+			}
 		} else {
-			ids = append(ids, bestID)
-			pos += bestLen
+			// Byte token not in vocab; use unknown score as last resort.
+			score := bestScore[i] + float64(t.unknownScore())
+			if score > bestScore[i+1] {
+				bestScore[i+1] = score
+				bestLen[i+1] = 1
+			}
 		}
 	}
-	return ids
+
+	// If we can't reach the end, return nil.
+	if math.IsInf(bestScore[n], -1) {
+		return nil
+	}
+
+	// Backtrack to find token sequence.
+	var tokens []int
+	pos := n
+	for pos > 0 {
+		tokLen := bestLen[pos]
+		candidate := text[pos-tokLen : pos]
+		if id, ok := t.vocab[candidate]; ok {
+			tokens = append(tokens, id)
+		} else {
+			// Byte fallback for single-byte token.
+			byteToken := fmt.Sprintf("<0x%02X>", text[pos-tokLen])
+			if id, ok := t.vocab[byteToken]; ok {
+				tokens = append(tokens, id)
+			} else {
+				tokens = append(tokens, t.special.UNK)
+			}
+		}
+		pos -= tokLen
+	}
+
+	// Reverse (we built it backwards).
+	for i, j := 0, len(tokens)-1; i < j; i, j = i+1, j-1 {
+		tokens[i], tokens[j] = tokens[j], tokens[i]
+	}
+
+	return tokens
+}
+
+// unknownScore returns a very negative score used for byte fallback tokens
+// when the <0xNN> token is not in the vocabulary.
+func (t *BPETokenizer) unknownScore() float32 {
+	return -100.0
 }
 
 // tokenScore returns the score for a token ID, or 0 if scores are not set
