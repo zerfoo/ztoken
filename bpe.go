@@ -342,10 +342,15 @@ func (t *BPETokenizer) sentencePieceEncode(text string) []int {
 				}
 			}
 		}
-		// Byte fallback: if no vocab token covers position i, use <0xNN>.
+		// Byte fallback: use <0xNN> as last resort when no vocab token covers
+		// position i. Byte tokens get a fixed penalty of -1e6 so they never
+		// beat real vocabulary tokens in the Viterbi DP. This matches
+		// llama.cpp / SentencePiece behavior where byte fallback is only
+		// used for characters that have no vocabulary coverage.
 		byteToken := fmt.Sprintf("<0x%02X>", text[i])
 		if id, ok := t.vocab[byteToken]; ok {
-			score := bestScore[i] + float64(t.tokenScore(id))
+			_ = id // byte token exists but we ignore its vocab score
+			score := bestScore[i] + (-1e6)
 			if score > bestScore[i+1] {
 				bestScore[i+1] = score
 				bestLen[i+1] = 1
