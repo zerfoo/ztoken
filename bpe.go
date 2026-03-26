@@ -18,7 +18,8 @@ type MergePair struct {
 // BPETokenizer implements the Tokenizer interface using byte-pair encoding.
 // It loads vocabulary and merge rules from HuggingFace tokenizer.json format.
 // When scores are set and merges are empty, it falls back to SentencePiece
-// unigram encoding using greedy longest-match with score-based selection.
+// encoding using greedy leftmost-longest match with score-based tie-breaking,
+// matching llama.cpp behavior.
 //
 // Stable.
 type BPETokenizer struct {
@@ -313,109 +314,62 @@ func (t *BPETokenizer) SetScores(scores []float32) {
 	}
 }
 
-// sentencePieceEncode tokenizes text using Viterbi dynamic programming to find
-// the segmentation that maximizes the sum of log-probability scores.
+// sentencePieceEncode tokenizes text using greedy leftmost-longest match.
 //
-// This is used for SentencePiece unigram models that provide vocabulary
-// scores but no BPE merge table (e.g., Mistral 7B GGUF). The Viterbi approach
-// finds the globally optimal segmentation, unlike greedy longest-match which
-// can produce suboptimal splits.
+// At each position, the longest vocabulary token is selected. Ties in length
+// are broken by score (higher wins). This matches the llama.cpp SentencePiece
+// tokenizer (llm_tokenizer_spm::tokenize) and produces the same output as
+// HuggingFace for GGUF models. When no vocabulary token matches a byte,
+// <0xNN> byte fallback tokens are used.
 func (t *BPETokenizer) sentencePieceEncode(text string) []int {
 	if text == "" {
 		return nil
 	}
 
-	n := len(text) // byte length
+	var ids []int
+	pos := 0
+	n := len(text)
 
-	// Viterbi forward pass: find best segmentation.
-	// bestScore[i] = best total score for text[:i]
-	// bestLen[i] = byte length of the last token in the best path ending at i
-	bestScore := make([]float64, n+1)
-	bestLen := make([]int, n+1)
-	for i := range bestScore {
-		bestScore[i] = math.Inf(-1)
-	}
-	bestScore[0] = 0
+	for pos < n {
+		// Find the longest matching token at the current position.
+		bestID := -1
+		bestLen := 0
+		bestScore := float32(math.Inf(-1))
 
-	for i := 0; i < n; i++ {
-		if math.IsInf(bestScore[i], -1) {
-			continue
-		}
-		// Try all possible tokens starting at position i.
 		maxLen := t.maxTokenLen
-		if maxLen > n-i {
-			maxLen = n - i
+		if maxLen > n-pos {
+			maxLen = n - pos
 		}
+
 		for tokenLen := 1; tokenLen <= maxLen; tokenLen++ {
-			candidate := text[i : i+tokenLen]
+			candidate := text[pos : pos+tokenLen]
 			if id, ok := t.vocab[candidate]; ok {
-				score := bestScore[i] + float64(t.tokenScore(id))
-				if score > bestScore[i+tokenLen] {
-					bestScore[i+tokenLen] = score
-					bestLen[i+tokenLen] = tokenLen
+				score := t.tokenScore(id)
+				// Prefer longest match; break ties by score.
+				if tokenLen > bestLen || (tokenLen == bestLen && score > bestScore) {
+					bestID = id
+					bestLen = tokenLen
+					bestScore = score
 				}
 			}
 		}
-		// Byte fallback: use <0xNN> as last resort when no vocab token covers
-		// position i. Byte tokens get a fixed penalty of -1e6 so they never
-		// beat real vocabulary tokens in the Viterbi DP. This matches
-		// llama.cpp / SentencePiece behavior where byte fallback is only
-		// used for characters that have no vocabulary coverage.
-		byteToken := fmt.Sprintf("<0x%02X>", text[i])
-		if id, ok := t.vocab[byteToken]; ok {
-			_ = id // byte token exists but we ignore its vocab score
-			score := bestScore[i] + (-1e6)
-			if score > bestScore[i+1] {
-				bestScore[i+1] = score
-				bestLen[i+1] = 1
-			}
-		} else {
-			// Byte token not in vocab; use unknown score as last resort.
-			score := bestScore[i] + float64(t.unknownScore())
-			if score > bestScore[i+1] {
-				bestScore[i+1] = score
-				bestLen[i+1] = 1
-			}
-		}
-	}
 
-	// If we can't reach the end, return nil.
-	if math.IsInf(bestScore[n], -1) {
-		return nil
-	}
-
-	// Backtrack to find token sequence.
-	var tokens []int
-	pos := n
-	for pos > 0 {
-		tokLen := bestLen[pos]
-		candidate := text[pos-tokLen : pos]
-		if id, ok := t.vocab[candidate]; ok {
-			tokens = append(tokens, id)
+		if bestID >= 0 {
+			ids = append(ids, bestID)
+			pos += bestLen
 		} else {
-			// Byte fallback for single-byte token.
-			byteToken := fmt.Sprintf("<0x%02X>", text[pos-tokLen])
+			// Byte fallback: use <0xNN> for the current byte.
+			byteToken := fmt.Sprintf("<0x%02X>", text[pos])
 			if id, ok := t.vocab[byteToken]; ok {
-				tokens = append(tokens, id)
+				ids = append(ids, id)
 			} else {
-				tokens = append(tokens, t.special.UNK)
+				ids = append(ids, t.special.UNK)
 			}
+			pos++
 		}
-		pos -= tokLen
 	}
 
-	// Reverse (we built it backwards).
-	for i, j := 0, len(tokens)-1; i < j; i, j = i+1, j-1 {
-		tokens[i], tokens[j] = tokens[j], tokens[i]
-	}
-
-	return tokens
-}
-
-// unknownScore returns a very negative score used for byte fallback tokens
-// when the <0xNN> token is not in the vocabulary.
-func (t *BPETokenizer) unknownScore() float32 {
-	return -100.0
+	return ids
 }
 
 // tokenScore returns the score for a token ID, or 0 if scores are not set
