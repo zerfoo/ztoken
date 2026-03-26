@@ -6,10 +6,11 @@ import (
 
 // testMetadata implements Metadata for testing.
 type testMetadata struct {
-	strings      map[string]string
-	stringArrays map[string][]string
-	uint32s      map[string]uint32
-	int32Arrays  map[string][]int32
+	strings       map[string]string
+	stringArrays  map[string][]string
+	uint32s       map[string]uint32
+	int32Arrays   map[string][]int32
+	float32Arrays map[string][]float32
 }
 
 func (m *testMetadata) GetString(key string) (string, bool) {
@@ -29,6 +30,14 @@ func (m *testMetadata) GetUint32(key string) (uint32, bool) {
 
 func (m *testMetadata) GetInt32Array(key string) ([]int32, bool) {
 	v, ok := m.int32Arrays[key]
+	return v, ok
+}
+
+func (m *testMetadata) GetFloat32Array(key string) ([]float32, bool) {
+	if m.float32Arrays == nil {
+		return nil, false
+	}
+	v, ok := m.float32Arrays[key]
 	return v, ok
 }
 
@@ -141,6 +150,65 @@ func TestExtractTokenizer_ControlTokens(t *testing.T) {
 	}
 	if len(ids) != 1 || ids[0] != 3 {
 		t.Errorf("Encode(\"<start_of_turn>\") = %v, want [3]", ids)
+	}
+}
+
+func TestExtractTokenizer_SentencePieceUnigram(t *testing.T) {
+	// Simulate a Mistral 7B GGUF: llama model with scores but no merges.
+	m := &testMetadata{
+		strings: map[string]string{
+			"tokenizer.ggml.model": "llama",
+		},
+		stringArrays: map[string][]string{
+			"tokenizer.ggml.tokens": {
+				"<unk>", "<s>", "</s>",
+				"\u2581Hello", "\u2581world",
+				"H", "e", "l", "o", "w", "r", "d",
+			},
+			// No merges key at all.
+		},
+		uint32s: map[string]uint32{
+			"tokenizer.ggml.bos_token_id":     1,
+			"tokenizer.ggml.eos_token_id":     2,
+			"tokenizer.ggml.unknown_token_id": 0,
+		},
+		int32Arrays: map[string][]int32{},
+		float32Arrays: map[string][]float32{
+			"tokenizer.ggml.scores": {
+				-100, -100, -100, // <unk>, <s>, </s>
+				-1.0, -1.0, // ▁Hello, ▁world (high score = preferred)
+				-5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -5.0, // individual chars
+			},
+		},
+	}
+
+	tok, err := ExtractTokenizer(m)
+	if err != nil {
+		t.Fatalf("ExtractTokenizer error: %v", err)
+	}
+
+	// Encode "Hello world" should produce [▁Hello, ▁world] = [3, 4].
+	ids, err := tok.Encode("Hello world")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	want := []int{3, 4}
+	if len(ids) != len(want) {
+		t.Fatalf("Encode(\"Hello world\") = %v (len=%d), want %v", ids, len(ids), want)
+	}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("Encode[%d] = %d, want %d", i, id, want[i])
+		}
+	}
+
+	// Decode should round-trip.
+	decoded, err := tok.Decode(ids)
+	if err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	if decoded != "Hello world" {
+		t.Errorf("Decode = %q, want %q", decoded, "Hello world")
 	}
 }
 
