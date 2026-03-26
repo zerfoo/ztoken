@@ -37,6 +37,10 @@ type BPETokenizer struct {
 	// sentencePiece enables SentencePiece-style pre-tokenization where spaces
 	// are replaced with ▁ (U+2581) and words are split at ▁ boundaries.
 	sentencePiece bool
+	// addLeadingSpace prepends ▁ to the first word during SentencePiece
+	// pre-tokenization. This is true by default for SentencePiece models,
+	// matching llama.cpp / SentencePiece behavior.
+	addLeadingSpace bool
 	// specialTokens maps special token strings to their IDs for exact matching
 	// during encoding (e.g., "<start_of_turn>" -> 105).
 	specialTokens map[string]int
@@ -92,8 +96,9 @@ func (t *BPETokenizer) Encode(text string) ([]int, error) {
 }
 
 // encodeSegment tokenizes a text segment that contains no special tokens.
-// addLeadingSpace controls whether SentencePiece mode prepends ▁ to the text.
-func (t *BPETokenizer) encodeSegment(text string, addLeadingSpace bool) ([]int, error) {
+// isFirstSegment indicates this is the first text segment (before any special
+// tokens), which determines whether the addLeadingSpace field applies.
+func (t *BPETokenizer) encodeSegment(text string, isFirstSegment bool) ([]int, error) {
 	if text == "" {
 		return nil, nil
 	}
@@ -101,7 +106,7 @@ func (t *BPETokenizer) encodeSegment(text string, addLeadingSpace bool) ([]int, 
 	if t.byteLevelBPE {
 		words = t.byteLevelPreTokenize(text)
 	} else if t.sentencePiece {
-		words = t.sentencePiecePreTokenize(text, addLeadingSpace)
+		words = t.sentencePiecePreTokenize(text, isFirstSegment && t.addLeadingSpace)
 	} else {
 		words = strings.Fields(text)
 	}
@@ -276,6 +281,15 @@ func (t *BPETokenizer) SpecialTokens() SpecialTokens {
 // are replaced with ▁ (U+2581) and the text is split at ▁ boundaries.
 func (t *BPETokenizer) SetSentencePiece(enabled bool) {
 	t.sentencePiece = enabled
+	t.addLeadingSpace = enabled
+}
+
+// SetAddLeadingSpace controls whether SentencePiece mode prepends ▁ to the
+// first word. By default this is set to true when SetSentencePiece is called,
+// matching llama.cpp / SentencePiece behavior. GGUF models may override this
+// via the tokenizer.ggml.add_space_prefix metadata key.
+func (t *BPETokenizer) SetAddLeadingSpace(enabled bool) {
+	t.addLeadingSpace = enabled
 }
 
 // SetSpecialTokenStrings registers token strings that should be matched
