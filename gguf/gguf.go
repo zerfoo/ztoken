@@ -19,6 +19,7 @@ type Metadata interface {
 	GetStringArray(key string) ([]string, bool)
 	GetUint32(key string) (uint32, bool)
 	GetInt32Array(key string) ([]int32, bool)
+	GetFloat32Array(key string) ([]float32, bool)
 }
 
 // ExtractTokenizer builds a BPETokenizer from GGUF metadata. GGUF files store
@@ -70,6 +71,13 @@ func ExtractTokenizer(m Metadata) (*ztoken.BPETokenizer, error) {
 	// as a space marker. Enable SentencePiece pre-tokenization for these.
 	if model, ok := m.GetString("tokenizer.ggml.model"); ok && model == "llama" {
 		tok.SetSentencePiece(true)
+	}
+
+	// Extract token scores for SentencePiece unigram models. When scores
+	// are present but merges are absent, the tokenizer uses greedy
+	// longest-match encoding instead of BPE merge-based encoding.
+	if scores, ok := m.GetFloat32Array("tokenizer.ggml.scores"); ok {
+		tok.SetScores(scores)
 	}
 
 	// Extract control/special tokens (token_type == 3) for exact matching

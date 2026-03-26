@@ -3,6 +3,7 @@ package ztoken
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // MergePair represents an adjacent token pair used in BPE merging.
@@ -15,6 +16,8 @@ type MergePair struct {
 
 // BPETokenizer implements the Tokenizer interface using byte-pair encoding.
 // It loads vocabulary and merge rules from HuggingFace tokenizer.json format.
+// When scores are set and merges are empty, it falls back to SentencePiece
+// unigram encoding using greedy longest-match with score-based selection.
 //
 // Stable.
 type BPETokenizer struct {
@@ -38,6 +41,13 @@ type BPETokenizer struct {
 	specialTokens map[string]int
 	// normalizer is an optional text normalization function applied before tokenization.
 	normalizer NormalizerFunc
+	// scores holds SentencePiece unigram scores (negative log probabilities)
+	// indexed by token ID. When scores are set and merges are empty, the
+	// tokenizer uses greedy longest-match encoding instead of BPE merging.
+	scores []float32
+	// maxTokenLen caches the length (in bytes) of the longest token in vocab,
+	// used to bound the search window in sentencePieceEncode.
+	maxTokenLen int
 }
 
 // NewBPETokenizer creates a BPETokenizer from vocabulary, merge rules, and special tokens.
@@ -94,13 +104,21 @@ func (t *BPETokenizer) encodeSegment(text string, addLeadingSpace bool) ([]int, 
 	} else {
 		words = strings.Fields(text)
 	}
+	// When merges are empty but scores are available, use SentencePiece
+	// unigram encoding (greedy longest-match) instead of BPE merging.
+	useUnigram := len(t.mergeRanks) == 0 && len(t.scores) > 0
+
 	var ids []int
 	for _, word := range words {
-		wordIDs, err := t.encodeWord(word)
-		if err != nil {
-			return nil, err
+		if useUnigram {
+			ids = append(ids, t.sentencePieceEncode(word)...)
+		} else {
+			wordIDs, err := t.encodeWord(word)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, wordIDs...)
 		}
-		ids = append(ids, wordIDs...)
 	}
 	return ids, nil
 }
@@ -224,6 +242,85 @@ func (t *BPETokenizer) SetSentencePiece(enabled bool) {
 // as single tokens during encoding instead of being split by BPE.
 func (t *BPETokenizer) SetSpecialTokenStrings(tokens map[string]int) {
 	t.specialTokens = tokens
+}
+
+// SetScores sets token scores for SentencePiece unigram encoding.
+// When scores are set and merges are empty, the tokenizer uses
+// score-based greedy encoding instead of BPE merge-based encoding.
+// Scores are indexed by token ID (negative log probabilities).
+func (t *BPETokenizer) SetScores(scores []float32) {
+	t.scores = scores
+	// Precompute max token length in bytes for search window bounding.
+	t.maxTokenLen = 0
+	for tok := range t.vocab {
+		if len(tok) > t.maxTokenLen {
+			t.maxTokenLen = len(tok)
+		}
+	}
+}
+
+// sentencePieceEncode tokenizes text using greedy longest-match with
+// score-based selection. For each position, it finds all vocabulary tokens
+// that match the input at that position, selects the longest match (breaking
+// ties by highest score), and advances past the matched token.
+//
+// This is used for SentencePiece unigram models that provide vocabulary
+// scores but no BPE merge table (e.g., Mistral 7B GGUF).
+func (t *BPETokenizer) sentencePieceEncode(text string) []int {
+	if text == "" {
+		return nil
+	}
+	var ids []int
+	pos := 0
+	textBytes := []byte(text)
+	n := len(textBytes)
+
+	for pos < n {
+		bestLen := 0
+		bestID := t.special.UNK
+		bestScore := float32(-1e30)
+
+		// Search for the longest matching token at this position.
+		// Limit search window to maxTokenLen bytes.
+		maxEnd := pos + t.maxTokenLen
+		if maxEnd > n {
+			maxEnd = n
+		}
+
+		for end := pos + 1; end <= maxEnd; end++ {
+			candidate := string(textBytes[pos:end])
+			if id, ok := t.vocab[candidate]; ok {
+				candidateLen := end - pos
+				// Prefer longer matches. For equal length, prefer higher score.
+				if candidateLen > bestLen || (candidateLen == bestLen && t.tokenScore(id) > bestScore) {
+					bestLen = candidateLen
+					bestID = id
+					bestScore = t.tokenScore(id)
+				}
+			}
+		}
+
+		if bestLen == 0 {
+			// No matching token found; emit UNK and advance by one byte.
+			ids = append(ids, t.special.UNK)
+			// Advance past one UTF-8 character, not just one byte.
+			_, size := decodeRune(textBytes[pos:])
+			pos += size
+		} else {
+			ids = append(ids, bestID)
+			pos += bestLen
+		}
+	}
+	return ids
+}
+
+// tokenScore returns the score for a token ID, or 0 if scores are not set
+// or the ID is out of range.
+func (t *BPETokenizer) tokenScore(id int) float32 {
+	if id >= 0 && id < len(t.scores) {
+		return t.scores[id]
+	}
+	return 0
 }
 
 // sentencePiecePreTokenize implements SentencePiece-style pre-tokenization.
@@ -402,6 +499,16 @@ func isPrintableGPT2Byte(b byte) bool {
 		return true
 	}
 	return false
+}
+
+// decodeRune decodes the first UTF-8 rune from b and returns it with its byte length.
+// If b is empty or invalid, it returns utf8.RuneError and 1 to ensure forward progress.
+func decodeRune(b []byte) (rune, int) {
+	r, size := utf8.DecodeRune(b)
+	if size == 0 {
+		return utf8.RuneError, 1
+	}
+	return r, size
 }
 
 // Statically assert BPETokenizer implements Tokenizer.
