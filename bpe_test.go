@@ -559,9 +559,9 @@ func TestSentencePieceUnigram_RoundTrip(t *testing.T) {
 func TestSentencePieceUnigram_UnknownChars(t *testing.T) {
 	tok := makeTestSentencePieceUnigram()
 
-	// Characters not in vocab should produce UNK or ▁ tokens via Viterbi.
+	// Characters not in vocab should produce UNK or ▁ tokens via byte fallback.
 	// "xyz" -> pre-tokenized as "▁xyz". Since ▁x, ▁y, ▁z are not in vocab,
-	// Viterbi will match ▁ first, then x, y, z via byte fallback or UNK.
+	// greedy will match ▁ first, then x, y, z via byte fallback or UNK.
 	ids, err := tok.Encode("xyz")
 	if err != nil {
 		t.Fatalf("Encode error: %v", err)
@@ -576,11 +576,11 @@ func TestSentencePieceUnigram_UnknownChars(t *testing.T) {
 	}
 }
 
-func TestSentencePieceUnigram_ViterbiOptimal(t *testing.T) {
+func TestSentencePieceUnigram_LongestMatch(t *testing.T) {
 	tok := makeTestSentencePieceUnigram()
 
-	// "Hello" should encode as one token ▁Hello (id=8) via Viterbi,
-	// since it has the best score (-1.0) vs splitting into subwords.
+	// "Hello" should encode as one token ▁Hello (id=8) via greedy longest-match,
+	// since it is the longest matching token at position 0.
 	ids, err := tok.Encode("Hello")
 	if err != nil {
 		t.Fatalf("Encode error: %v", err)
@@ -608,11 +608,10 @@ func TestSentencePieceUnigram_WithBPEFallback(t *testing.T) {
 	}
 }
 
-func TestSentencePieceUnigram_ViterbiBeatsGreedy(t *testing.T) {
-	// This test demonstrates that Viterbi finds a better segmentation than greedy.
-	// Vocab has "▁hel" and "lo" with good scores, and "▁h" and "ello" with worse scores.
-	// Greedy longest-match would pick "▁hello" if available, or "▁hell" + "o".
-	// But here we set up scores so "▁hel" + "lo" is strictly better than "▁hell" + "o".
+func TestSentencePieceUnigram_GreedyLongestMatch(t *testing.T) {
+	// Greedy leftmost-longest match picks the longest token at each position.
+	// For "▁hello": longest match at pos 0 is "▁hell" (4 chars), then "o".
+	// This matches llama.cpp / HuggingFace SentencePiece behavior.
 	vocab := map[string]int{
 		"<unk>":     0,
 		"<s>":      1,
@@ -633,11 +632,11 @@ func TestSentencePieceUnigram_ViterbiBeatsGreedy(t *testing.T) {
 	scores[3] = -5.0   // ▁
 	scores[4] = -4.0   // ▁h
 	scores[5] = -3.0   // ▁he
-	scores[6] = -1.5   // ▁hel  (good)
-	scores[7] = -3.0   // ▁hell (worse than ▁hel)
-	scores[8] = -3.0   // o     (bad)
-	scores[9] = -4.0   // l     (bad)
-	scores[10] = -1.0  // lo    (good)
+	scores[6] = -1.5   // ▁hel
+	scores[7] = -3.0   // ▁hell
+	scores[8] = -3.0   // o
+	scores[9] = -4.0   // l
+	scores[10] = -1.0  // lo
 
 	special := SpecialTokens{BOS: 1, EOS: 2, PAD: 0, UNK: 0}
 	tok := NewBPETokenizer(vocab, nil, special, false)
@@ -648,9 +647,8 @@ func TestSentencePieceUnigram_ViterbiBeatsGreedy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode error: %v", err)
 	}
-	// Viterbi should choose "▁hel" + "lo" (score -1.5 + -1.0 = -2.5)
-	// over "▁hell" + "o" (score -3.0 + -3.0 = -6.0).
-	want := []int{6, 10} // ▁hel, lo
+	// Greedy picks longest match: "▁hell" (id=7) then "o" (id=8).
+	want := []int{7, 8} // ▁hell, o
 	if len(ids) != len(want) {
 		t.Fatalf("Encode(\"hello\") = %v, want %v", ids, want)
 	}
@@ -940,8 +938,8 @@ func TestSentencePieceUnigram_ByteFallbackStillWorksForUnknownChars(t *testing.T
 
 func TestSentencePieceUnigram_AddLeadingSpaceDefault(t *testing.T) {
 	// Regression test: SetSentencePiece(true) must enable addLeadingSpace so
-	// the Viterbi receives "▁What" (7 bytes) as input rather than "What" (4 bytes).
-	// Without addLeadingSpace, the ▁ prefix is missing and the Viterbi produces
+	// the encoder receives "▁What" (7 bytes) as input rather than "What" (4 bytes).
+	// Without addLeadingSpace, the ▁ prefix is missing and the encoder produces
 	// byte-level or character-level fallback tokens instead of matching "▁What".
 	vocab := map[string]int{
 		"<unk>":       0,
@@ -997,7 +995,7 @@ func TestSentencePieceUnigram_AddLeadingSpaceDefault(t *testing.T) {
 	}
 	// With addLeadingSpace=true, pre-tokenizer produces:
 	//   ["▁What", "▁is", "▁the", "▁capital", "▁of", "▁France?"]
-	// The Viterbi should match ▁What (ID 3) as a single token.
+	// The encoder should match ▁What (ID 3) as a single token.
 	// Without addLeadingSpace, "What" has no ▁ prefix and falls back to
 	// character tokens [W, h, a, t] — this was the bug.
 	want := []int{3, 4, 5, 6, 7, 8, 9}
