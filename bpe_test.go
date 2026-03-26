@@ -938,6 +938,79 @@ func TestSentencePieceUnigram_ByteFallbackStillWorksForUnknownChars(t *testing.T
 	}
 }
 
+func TestSentencePieceUnigram_AddLeadingSpaceDefault(t *testing.T) {
+	// Regression test: SetSentencePiece(true) must enable addLeadingSpace so
+	// the Viterbi receives "▁What" (7 bytes) as input rather than "What" (4 bytes).
+	// Without addLeadingSpace, the ▁ prefix is missing and the Viterbi produces
+	// byte-level or character-level fallback tokens instead of matching "▁What".
+	vocab := map[string]int{
+		"<unk>":       0,
+		"<s>":        1,
+		"</s>":       2,
+		"\u2581What":    3,
+		"\u2581is":      4,
+		"\u2581the":     5,
+		"\u2581capital": 6,
+		"\u2581of":      7,
+		"\u2581France":  8,
+		"?":          9,
+		"W":          10,
+		"h":          11,
+		"a":          12,
+		"t":          13,
+	}
+	// Add byte fallback tokens.
+	nextID := 14
+	for b := 0; b < 256; b++ {
+		tok := fmt.Sprintf("<0x%02X>", b)
+		vocab[tok] = nextID
+		nextID++
+	}
+
+	scores := make([]float32, nextID)
+	scores[0] = -100
+	scores[1] = -100
+	scores[2] = -100
+	scores[3] = -2.0  // ▁What
+	scores[4] = -2.0  // ▁is
+	scores[5] = -2.0  // ▁the
+	scores[6] = -2.0  // ▁capital
+	scores[7] = -2.0  // ▁of
+	scores[8] = -2.0  // ▁France
+	scores[9] = -3.0  // ?
+	scores[10] = -5.0 // W
+	scores[11] = -5.0 // h
+	scores[12] = -5.0 // a
+	scores[13] = -5.0 // t
+	for i := 14; i < nextID; i++ {
+		scores[i] = -10.0
+	}
+
+	special := SpecialTokens{BOS: 1, EOS: 2, PAD: 0, UNK: 0}
+	tok := NewBPETokenizer(vocab, nil, special, false)
+	tok.SetSentencePiece(true) // Must also set addLeadingSpace = true
+	tok.SetScores(scores)
+
+	ids, err := tok.Encode("What is the capital of France?")
+	if err != nil {
+		t.Fatalf("Encode error: %v", err)
+	}
+	// With addLeadingSpace=true, pre-tokenizer produces:
+	//   ["▁What", "▁is", "▁the", "▁capital", "▁of", "▁France?"]
+	// The Viterbi should match ▁What (ID 3) as a single token.
+	// Without addLeadingSpace, "What" has no ▁ prefix and falls back to
+	// character tokens [W, h, a, t] — this was the bug.
+	want := []int{3, 4, 5, 6, 7, 8, 9}
+	if len(ids) != len(want) {
+		t.Fatalf("Encode produced %d tokens %v, want %d tokens %v", len(ids), ids, len(want), want)
+	}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("[%d] = %d, want %d", i, id, want[i])
+		}
+	}
+}
+
 func TestDecodeSentencePieceBytes(t *testing.T) {
 	tests := []struct {
 		name  string
