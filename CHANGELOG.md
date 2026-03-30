@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0](https://github.com/zerfoo/ztoken/compare/v0.3.4...v1.0.0) (2026-03-30)
+
+
+### Bug Fixes
+
+* **tests:** resolve go vet failures and incorrect test expectations ([5a142bc](https://github.com/zerfoo/ztoken/commit/5a142bcff4abc3007d81fd305a874ad87c0802c6))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([d339bd4](https://github.com/zerfoo/ztoken/commit/d339bd43e03534c2042788d4bcbea35bd363758d))
+
 ## [0.2.0](https://github.com/zerfoo/ztoken/compare/v0.1.0...v0.2.0) (2026-03-16)
 
 ### Documentation
