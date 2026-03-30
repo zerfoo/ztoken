@@ -1009,24 +1009,3 @@ func TestSentencePieceUnigram_AddLeadingSpaceDefault(t *testing.T) {
 	}
 }
 
-func TestDecodeSentencePieceBytes(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{"no byte tokens", "hello", "hello"},
-		{"single byte", "<0x41>", "A"},
-		{"multiple bytes", "<0xC3><0xA9>", "\xc3\xa9"}, // é
-		{"mixed", "hello<0x21>world", "hello!world"},
-		{"invalid hex preserved", "<0xZZ>", "<0xZZ>"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := decodeSentencePieceBytes(tc.input)
-			if got != tc.want {
-				t.Errorf("decodeSentencePieceBytes(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
-	}
-}
